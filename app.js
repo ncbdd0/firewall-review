@@ -21,8 +21,11 @@ const LS_MASTERY = 'fw_mastery_v1';
 const LS_HISTORY = 'fw_quiz_history_v1';
 const LS_AUTH = 'fw_auth_v1';
 const VAULT_URL = 'data/vault.enc';
+const DOCS_URL = 'data/docs.enc';
 const KDF_ITER = 250000;
-const VAULT_MARKER = 'FW-VAULT-V1';
+const VAULT_MARKER = 'FW-VAULT-V2';
+const DOCS_MARKER = 'FW-DOCS-V1';
+const MAMMOTH_URL = 'js/vendor/mammoth.browser.min.js';
 
 /* ---------- 状态 ---------- */
 const state = {
@@ -31,7 +34,10 @@ const state = {
   recite: { bank: 'all', types: { choice: true, fill: true, term: true, short: true }, chapter: 'all', mastery: 'all', search: '', hide: false, limit: 40 },
   quizSetup: { bank: 'all', types: { choice: true, fill: true, term: true, short: true }, chapter: 'all', count: 20, shuffle: true },
   quiz: null,
-  kb: { bank: 'outline', search: '' },
+  kb: { bank: 'outline', search: '', view: 'kb' },
+  docs: { loaded: false, loading: false, site: [], mine: [], urls: {} },
+  images: {},
+  password: null,
 };
 
 /* ---------- 小工具 ---------- */
@@ -60,8 +66,8 @@ function banksOf(bank) { return bank === 'all' ? ['outline', 'experiment'] : [ba
 function bankLabel(bank) { return bank === 'all' ? '双库' : BANK_NAME[bank]; }
 
 /* ---------- 数据加载（AES-256-CBC 加密库） ---------- */
-async function fetchVault(password) {
-  const res = await fetch(VAULT_URL, { cache: 'no-cache' });
+async function decryptEnc(url, marker, password) {
+  const res = await fetch(url, { cache: 'no-cache' });
   if (!res.ok) throw new Error('vault-missing');
   const buf = new Uint8Array(await res.arrayBuffer());
   /* openssl enc 格式："Salted__" + 8字节盐 + 密文 */
@@ -73,9 +79,15 @@ async function fetchVault(password) {
   const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: salt, iterations: KDF_ITER }, baseKey, 384);
   const key = await crypto.subtle.importKey('raw', bits.slice(0, 32), { name: 'AES-CBC' }, false, ['decrypt']);
   const pt = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: bits.slice(32, 48) }, key, ct);
-  const vault = JSON.parse(new TextDecoder().decode(pt));
-  if (!vault || vault.marker !== VAULT_MARKER) throw new Error('bad-password');
-  return vault;
+  const obj = JSON.parse(new TextDecoder().decode(pt));
+  if (!obj || obj.marker !== marker) throw new Error('bad-password');
+  return obj;
+}
+function fetchVault(password) {
+  return decryptEnc(VAULT_URL, VAULT_MARKER, password);
+}
+function fetchDocsVault(password) {
+  return decryptEnc(DOCS_URL, DOCS_MARKER, password);
 }
 function distributeVault(vault) {
   const files = vault.files || {};
@@ -86,6 +98,12 @@ function distributeVault(vault) {
       state.data[bank][t] = qs;
     });
     state.data[bank].kb = files[bank + '-kb'] || { sections: [] };
+  });
+  /* 知识库图片 → data URI */
+  state.images = {};
+  const imgs = vault.images || {};
+  Object.keys(imgs).forEach(k => {
+    state.images[k] = 'data:' + imgs[k].mime + ';base64,' + imgs[k].b64;
   });
 }
 
@@ -639,6 +657,16 @@ function mdLite(src) {
     fences.push('<pre><code>' + code.replace(/^\n+|\n+$/g, '') + '</code></pre>');
     return '\u0000F' + (fences.length - 1) + '\u0000';
   });
+  /* 图片（加密库内嵌）：![](img:key) + 可选 *图注* */
+  const figs = [];
+  s = s.replace(/!\[\]\(img:([a-zA-Z0-9_]+)\)(?:\n+\*([^*\n]+)\*)?/g, (m, key, cap) => {
+    const uri = (state.images && state.images[key]) || '';
+    figs.push('<figure class="kb-fig">' +
+      '<img class="kb-img" src="' + uri + '" alt="' + (cap || '') + '" data-key="' + key + '" loading="lazy">' +
+      (cap ? '<figcaption>' + cap + '</figcaption>' : '') +
+      '</figure>');
+    return '\u0000G' + (figs.length - 1) + '\u0000';
+  });
   s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
 
@@ -651,6 +679,8 @@ function mdLite(src) {
     if (!line) { flushPara(); closeList(); continue; }
     const fm = line.match(/^\u0000F(\d+)\u0000$/);
     if (fm) { flushPara(); closeList(); html += fences[+fm[1]]; continue; }
+    const gm = line.match(/^\u0000G(\d+)\u0000$/);
+    if (gm) { flushPara(); closeList(); html += figs[+gm[1]]; continue; }
     const li = line.match(/^[-•]\s+(.*)$/);
     if (li) { flushPara(); if (!inList) { html += '<ul>'; inList = true; } html += '<li>' + li[1] + '</li>'; continue; }
     closeList();
@@ -658,6 +688,7 @@ function mdLite(src) {
   }
   flushPara(); closeList();
   html = html.replace(/\u0000F(\d+)\u0000/g, (m, i) => fences[+i] || '');
+  html = html.replace(/\u0000G(\d+)\u0000/g, (m, i) => figs[+i] || '');
   return html;
 }
 function highlight(text, query) {
@@ -670,6 +701,13 @@ function highlight(text, query) {
   });
 }
 function renderKB() {
+  /* 子页签：原文知识库 / 文档中心 */
+  const isDocs = state.kb.view === 'docs';
+  $$('#kbSubtabs button').forEach(b => b.classList.toggle('is-active', b.dataset.view === state.kb.view));
+  $('#kbControls').hidden = isDocs;
+  $('#kbStage').hidden = isDocs;
+  $('#docsStage').hidden = !isDocs;
+  if (isDocs) { renderDocs(); return; }
   const bank = state.kb.bank;
   const query = state.kb.search.trim();
   const stage = $('#kbStage');
@@ -717,6 +755,205 @@ function renderKB() {
 }
 
 /* ============================================================
+   文档中心（站点加密文档 + 本机上传文档）
+   ============================================================ */
+function fmtSize(n) {
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  if (n >= 1024) return Math.round(n / 1024) + ' KB';
+  return n + ' B';
+}
+function extOf(name) {
+  const m = String(name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  return m ? m[1] : '';
+}
+function mimeFromName(name) {
+  return { pdf: 'application/pdf',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    doc: 'application/msword',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }[extOf(name)] || 'application/octet-stream';
+}
+/* ---------- IndexedDB（我的上传，仅本机浏览器） ---------- */
+function idb() {
+  return new Promise((res, rej) => {
+    const rq = indexedDB.open('fw_docs_v1', 1);
+    rq.onupgradeneeded = () => { rq.result.createObjectStore('docs', { keyPath: 'id' }); };
+    rq.onsuccess = () => res(rq.result);
+    rq.onerror = () => rej(rq.error || new Error('idb-open-failed'));
+  });
+}
+async function idbAll() {
+  try {
+    const db = await idb();
+    return await new Promise((res, rej) => {
+      const rq = db.transaction('docs').objectStore('docs').getAll();
+      rq.onsuccess = () => res(rq.result || []);
+      rq.onerror = () => rej(rq.error);
+    });
+  } catch (e) { return []; }
+}
+async function idbPut(rec) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const rq = db.transaction('docs', 'readwrite').objectStore('docs').put(rec);
+    rq.onsuccess = res; rq.onerror = () => rej(rq.error);
+  });
+}
+async function idbDel(id) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const rq = db.transaction('docs', 'readwrite').objectStore('docs').delete(id);
+    rq.onsuccess = res; rq.onerror = () => rej(rq.error);
+  });
+}
+/* ---------- 文档 blob URL 管理 ---------- */
+function b64ToBlob(b64, mime) {
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return new Blob([u8], { type: mime });
+}
+function docUrl(d, src) {
+  if (state.docs.urls[d.id]) return Promise.resolve(state.docs.urls[d.id]);
+  return new Promise((res) => {
+    if (src === 'mine' && d.blob) {
+      const u = URL.createObjectURL(d.blob);
+      state.docs.urls[d.id] = u; res(u);
+    } else if (d.b64) {
+      const u = URL.createObjectURL(b64ToBlob(d.b64, d.mime || mimeFromName(d.name)));
+      state.docs.urls[d.id] = u; res(u);
+    } else res('');
+  });
+}
+/* ---------- 渲染 ---------- */
+function docCardHTML(d, src) {
+  const ext = d.ext || extOf(d.name);
+  const icoMap = { pdf: ['pdf', 'PDF'], docx: ['doc', 'DOC'], doc: ['doc', 'DOC'], xlsx: ['xls', 'XLS'], pptx: ['ppt', 'PPT'] };
+  const ico = icoMap[ext] || ['file', (ext || 'FILE').toUpperCase().slice(0, 4)];
+  const date = d.added ? new Date(d.added).toLocaleDateString('zh-CN') : '';
+  const meta = fmtSize(d.size) + (date ? ' · ' + date : '') + (d.desc ? ' · ' + escapeHtml(d.desc) : '');
+  return '<div class="doc-card" data-id="' + d.id + '" data-src="' + src + '">' +
+    '<div class="doc-ico ' + ico[0] + '">' + ico[1] + '</div>' +
+    '<div class="doc-info"><div class="doc-name">' + escapeHtml(d.name) + '</div>' +
+    '<div class="doc-meta">' + meta + '</div></div>' +
+    '<div class="doc-acts">' +
+      '<button class="mini-btn" data-act="preview" type="button">👁 预览</button>' +
+      '<button class="mini-btn" data-act="download" type="button">⬇ 下载</button>' +
+      (src === 'mine' ? '<button class="mini-btn doc-del" data-act="delete" type="button">🗑</button>' : '') +
+    '</div></div>';
+}
+async function renderDocs() {
+  const list = $('#docList');
+  if (!state.docs.loaded) {
+    if (state.docs.loading) return;
+    state.docs.loading = true;
+    list.innerHTML = '<div class="docs-loading"><span class="spin"></span> 正在解密文档库…（约 10MB，首次稍慢）</div>';
+    try {
+      const dv = await fetchDocsVault(state.password);
+      state.docs.site = dv.files || [];
+      state.docs.loaded = true;
+      state.docs.loading = false;
+    } catch (e) {
+      state.docs.loading = false;
+      const why = e.message === 'vault-missing' ? 'docs.enc 文件不存在' : e.message === 'vault-format' ? '文档库格式异常' : '解密失败';
+      list.innerHTML = '<div class="docs-empty">⚠ 文档库加载失败：' + why + '<br><br><button class="ghost-btn" id="docsRetry" type="button">重新加载</button></div>';
+      const rb = $('#docsRetry'); if (rb) rb.addEventListener('click', renderDocs);
+      return;
+    }
+  }
+  state.docs.mine = await idbAll();
+  const siteHTML = state.docs.site.map(d => docCardHTML(d, 'site')).join('');
+  const mineHTML = state.docs.mine.map(d => docCardHTML(d, 'mine')).join('');
+  list.innerHTML =
+    '<section class="doc-group"><h3 class="dg-title">📚 站点文档<span class="dg-cnt">' + state.docs.site.length + '</span></h3>' +
+      (siteHTML || '<div class="docs-empty">暂无</div>') + '</section>' +
+    '<section class="doc-group"><h3 class="dg-title">📎 我的上传<span class="dg-cnt">' + state.docs.mine.length + '</span><span class="dg-note">存于本机浏览器</span></h3>' +
+      (mineHTML || '<div class="docs-empty">还没有上传文档——把老师补充的资料拖到上方虚线框即可</div>') + '</section>';
+}
+async function saveFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  for (const f of files) {
+    const rec = {
+      id: 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      name: f.name, mime: f.type || mimeFromName(f.name), size: f.size,
+      added: Date.now(), blob: f,
+    };
+    try { await idbPut(rec); } catch (e) { alert('保存失败：' + f.name); }
+  }
+  renderDocs();
+}
+async function downloadDoc(d, src) {
+  const url = await docUrl(d, src);
+  if (!url) return;
+  const a = document.createElement('a');
+  a.href = url; a.download = d.name;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+/* ---------- mammoth（DOCX 预览）懒加载 ---------- */
+function loadMammoth() {
+  if (window.mammoth) return Promise.resolve(window.mammoth);
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = MAMMOTH_URL;
+    s.onload = () => window.mammoth ? res(window.mammoth) : rej(new Error('加载异常'));
+    s.onerror = () => rej(new Error('mammoth 脚本加载失败'));
+    document.head.appendChild(s);
+  });
+}
+/* ---------- 预览弹层 ---------- */
+async function openPreview(d, src) {
+  const modal = $('#pvModal');
+  $('#pvName').textContent = d.name;
+  $('#pvBody').innerHTML = '<div class="docs-loading"><span class="spin"></span> 准备预览…</div>';
+  modal.hidden = false;
+  document.body.classList.add('no-scroll');
+  const url = await docUrl(d, src);
+  const newBtn = $('#pvNew');
+  newBtn.onclick = () => { if (url) window.open(url, '_blank'); };
+  const ext = d.ext || extOf(d.name);
+  if (!url) {
+    $('#pvBody').innerHTML = '<div class="docs-empty">无法读取该文档</div>';
+    return;
+  }
+  if (ext === 'pdf') {
+    $('#pvBody').innerHTML = '<iframe class="pv-frame" src="' + url + '" title="PDF 预览"></iframe>';
+  } else if (ext === 'docx') {
+    try {
+      const m = await loadMammoth();
+      const ab = await (await fetch(url)).arrayBuffer();
+      const r = await m.convertToHtml({ arrayBuffer: ab });
+      $('#pvBody').innerHTML = '<div class="docx-view">' + r.value + '</div>';
+    } catch (e) {
+      $('#pvBody').innerHTML = '<div class="docs-empty">DOCX 预览失败（' + e.message + '），请下载后查看</div>';
+    }
+  } else if (/^image\//.test(d.mime || mimeFromName(d.name))) {
+    $('#pvBody').innerHTML = '<img class="pv-img" src="' + url + '" alt="">';
+  } else {
+    $('#pvBody').innerHTML = '<div class="docs-empty">该类型（' + escapeHtml(ext || '未知') + '）暂不支持在线预览<br><br>' +
+      '<button class="primary-btn" id="pvDl" type="button">⬇ 下载文件</button></div>';
+    const b = $('#pvDl'); if (b) b.addEventListener('click', () => downloadDoc(d, src));
+  }
+}
+function closePreview() {
+  $('#pvModal').hidden = true;
+  $('#pvBody').innerHTML = '';
+  document.body.classList.remove('no-scroll');
+}
+/* ---------- 知识库图片灯箱 ---------- */
+function openLightbox(src) {
+  $('#lbImg').src = src;
+  $('#lightbox').hidden = false;
+  document.body.classList.add('no-scroll');
+}
+function closeLightbox() {
+  $('#lightbox').hidden = true;
+  $('#lbImg').src = '';
+  document.body.classList.remove('no-scroll');
+}
+
+/* ============================================================
    事件绑定与启动
    ============================================================ */
 function bindStatic() {
@@ -734,6 +971,66 @@ function bindStatic() {
     if (confirm('锁定网站？锁定后需重新输入密码才能继续使用。')) {
       try { localStorage.removeItem(LS_AUTH); } catch (e) { /* 忽略 */ }
       location.reload();
+    }
+  });
+
+  /* 知识库子页签 */
+  $$('#kbSubtabs button').forEach(b => b.addEventListener('click', () => {
+    state.kb.view = b.dataset.view;
+    renderKB();
+  }));
+
+  /* 知识库图片 → 灯箱 */
+  $('#kbStage').addEventListener('click', e => {
+    const img = e.target.closest('img.kb-img');
+    if (img && img.src) openLightbox(img.src);
+  });
+  $('#lightbox').addEventListener('click', closeLightbox);
+
+  /* 文档中心：上传区 */
+  const zone = $('#uploadZone'), fileInput = $('#fileInput');
+  if (zone && fileInput) {
+    zone.addEventListener('click', e => {
+      if (e.target === fileInput) return; /* 防止程序化click冒泡造成循环 */
+      fileInput.click();
+    });
+    fileInput.addEventListener('change', async () => { await saveFiles(fileInput.files); fileInput.value = ''; });
+    ['dragover', 'dragenter'].forEach(ev => zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.add('is-over'); }));
+    zone.addEventListener('dragleave', e => { e.preventDefault(); zone.classList.remove('is-over'); });
+    zone.addEventListener('drop', async e => {
+      e.preventDefault();
+      zone.classList.remove('is-over');
+      if (e.dataTransfer && e.dataTransfer.files.length) await saveFiles(e.dataTransfer.files);
+    });
+  }
+
+  /* 文档卡片操作（事件委托） */
+  $('#docList').addEventListener('click', async e => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const card = btn.closest('.doc-card');
+    if (!card) return;
+    const id = card.dataset.id, src = card.dataset.src;
+    const d = (src === 'site' ? state.docs.site : state.docs.mine).find(x => x.id === id);
+    if (!d) return;
+    const act = btn.dataset.act;
+    if (act === 'preview') openPreview(d, src);
+    else if (act === 'download') downloadDoc(d, src);
+    else if (act === 'delete') {
+      if (confirm('删除「' + d.name + '」？')) {
+        try { await idbDel(id); } catch (err) { /* 忽略 */ }
+        if (state.docs.urls[id]) { URL.revokeObjectURL(state.docs.urls[id]); delete state.docs.urls[id]; }
+        renderDocs();
+      }
+    }
+  });
+
+  /* 预览弹层关闭 */
+  $('#pvClose').addEventListener('click', closePreview);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      if (!$('#lightbox').hidden) closeLightbox();
+      else if (!$('#pvModal').hidden) closePreview();
     }
   });
 
@@ -810,6 +1107,7 @@ function lockError(text) {
 }
 async function unlockWith(password) {
   const vault = await fetchVault(password);
+  state.password = password;
   distributeVault(vault);
   try { localStorage.setItem(LS_AUTH, password); } catch (e) { /* 忽略 */ }
   $('#lockScreen').hidden = true;
