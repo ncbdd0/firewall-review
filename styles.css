@@ -615,15 +615,25 @@ img{ max-width:100%; }
 .kb-acc{ display:flex; flex-direction:column; gap:14px; }
 .kb-sec{
   background:var(--card); border:1px solid var(--line); border-radius:var(--rad);
-  box-shadow:var(--shadow); overflow:hidden;
+  box-shadow:var(--shadow);
+  /* 注意：不可设 overflow:hidden，否则子元素 position:sticky 失效 */
 }
 .kb-sec-head{
   width:100%; display:flex; align-items:center; gap:13px;
   background:linear-gradient(150deg, var(--paper), var(--card));
   border:none; padding:15px 18px; text-align:left;
+  border-radius:calc(var(--rad) - 1px) calc(var(--rad) - 1px) 0 0;
   transition:background .18s ease;
 }
 .kb-sec-head:hover{ background:var(--paper-2); }
+/* 展开的章节头吸顶：下滑浏览内容时标签钉在顶部，随手可点关 */
+.kb-sec.open > .kb-sec-head{
+  position:sticky; top:0; z-index:40;
+  background:var(--paper-2);
+  border-bottom:2px solid var(--line-2);
+  border-radius:0;
+  box-shadow:0 10px 26px -12px rgba(31,26,12,.42);
+}
 .kb-sec-idx{
   font-family:var(--font-mono); font-size:13px; font-weight:700;
   color:var(--accent); border:1.5px solid rgba(194,65,12,.45);
