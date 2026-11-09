@@ -5,16 +5,18 @@
 'use strict';
 
 /* ---------- 常量 ---------- */
-const TYPES = ['choice', 'fill', 'term', 'short'];
+const TYPES = ['choice', 'fill', 'term', 'judge', 'short', 'comp'];
 const TYPE_META = {
-  choice: { name: '选择', full: '选择题', color: '#16293f' },
+  choice: { name: '选择', full: '单项选择题', color: '#16293f' },
   fill:   { name: '填空', full: '填空题', color: '#b45309' },
   term:   { name: '名词', full: '名词解释', color: '#0f766e' },
+  judge:  { name: '判断', full: '判别是非题', color: '#9a3412' },
   short:  { name: '简答', full: '简答题', color: '#86198f' },
+  comp:   { name: '综合', full: '综合问答题', color: '#4338ca' },
 };
 const BANK_NAME = { outline: '提纲', experiment: '实验' };
 const CHAPTER_ORDER = {
-  outline: ['第一章 防火墙概述', '第二章 防火墙体系结构', '第三章 软件防火墙', '第四章 硬件防火墙', '第五章 防火墙配置'],
+  outline: ['第一章 防火墙概述', '第二章 防火墙体系结构', '第三章 软件防火墙', '第四章 硬件防火墙', '第五章 防火墙配置', '第六章 VPN原理与技术'],
   experiment: ['实验一', '实验二', '实验三', '实验四', '实验五'],
 };
 const LS_MASTERY = 'fw_mastery_v1';
@@ -31,8 +33,8 @@ const MAMMOTH_URL = 'js/vendor/mammoth.browser.min.js';
 const state = {
   mode: 'recite',
   data: null,
-  recite: { bank: 'all', types: { choice: true, fill: true, term: true, short: true }, chapter: 'all', mastery: 'all', search: '', hide: false, limit: 40 },
-  quizSetup: { bank: 'all', types: { choice: true, fill: true, term: true, short: true }, chapter: 'all', count: 20, shuffle: true },
+  recite: { bank: 'all', types: { choice: true, fill: true, term: true, judge: true, short: true, comp: true }, chapter: 'all', mastery: 'all', search: '', hide: false, limit: 40 },
+  quizSetup: { bank: 'all', types: { choice: true, fill: true, term: true, judge: true, short: true, comp: true }, chapter: 'all', count: 20, shuffle: true },
   quiz: null,
   kb: { bank: 'outline', search: '', view: 'kb' },
   docs: { loaded: false, loading: false, site: [], mine: [], urls: {} },
@@ -134,6 +136,9 @@ function refAnswerText(q) {
     if (arr.length > 1) return arr.map((b, i) => '［' + (i + 1) + '］' + (b[0] || '')).join('　');
     return arr.length && arr[0].length ? arr[0][0] : '';
   }
+  if (q.type === 'judge') {
+    return q.answer ? '√ 正确' : '× 错误';
+  }
   return q.answer || '';
 }
 function questionDisplayText(q) {
@@ -203,6 +208,7 @@ function reciteCardHTML(q, i) {
   const answerHTML =
     q.type === 'fill' ? escapeHtml(refAnswerText(q)) :
     q.type === 'choice' ? escapeHtml(refAnswerText(q)) :
+    q.type === 'judge' ? (q.answer ? '√ 正确' : '× 错误') :
     escapeHtml(q.answer || '');
   return (
     '<article class="qa-card" style="--tc:' + tm.color + ';--i:' + Math.min(i, 14) + '" data-uid="' + q.uid + '">' +
@@ -292,7 +298,7 @@ function renderQuizSetup() {
   stage.innerHTML =
     '<div class="quiz-setup">' +
       '<div class="setup-title">做题模式 · 自测演练</div>' +
-      '<div class="setup-sub">做完一题点击「下一题」，系统自动判分；名词解释与简答题按关键词命中判定，可自行改判。</div>' +
+      '<div class="setup-sub">做完一题点击「下一题」，系统自动判分；名词解释、简答与综合问答按关键词命中判定，可自行改判。</div>' +
       '<div class="setup-block">' +
         '<div class="setup-label">题库范围</div>' +
         '<div class="segmented" id="qBank">' +
@@ -397,12 +403,19 @@ function renderQuizQuestion() {
       (q.options || []).map((o, i) =>
         '<button type="button" class="opt" data-i="' + i + '"><span class="opt-letter">' + 'ABCDEFGH'[i] + '</span><span>' + escapeHtml(o) + '</span></button>'
       ).join('') + '</div>';
+  } else if (q.type === 'judge') {
+    bodyHTML = '<div class="opt-list judge-list">' +
+      '<button type="button" class="opt judge-opt j-yes" data-i="0"><span class="opt-letter">✓</span><span>正确</span></button>' +
+      '<button type="button" class="opt judge-opt j-no" data-i="1"><span class="opt-letter">✗</span><span>错误</span></button>' +
+      '</div><div class="judge-hint">判断上面的陈述是否正确</div>';
   } else if (q.type === 'fill') {
     /* 题干在上文已用＿＿＿＿标出空位，此处只渲染逐空输入框 */
     bodyHTML = '<div class="fill-inputs">' + buildFillFlow(q) + '</div>';
   } else {
     bodyHTML = '<textarea class="ans-textarea" id="ansText" placeholder="' +
-      (q.type === 'term' ? '默写该术语的定义…' : '分点默写答案要点，可用 ①②③…') + '"></textarea>';
+      (q.type === 'term' ? '默写该术语的定义…' :
+       q.type === 'comp' ? '综合题：分点作答，尽量覆盖各关键要点，可用 ①②③…' :
+       '分点默写答案要点，可用 ①②③…') + '"></textarea>';
   }
 
   stage.innerHTML =
@@ -421,7 +434,10 @@ function renderQuizQuestion() {
         '<div class="quiz-q">' + (q.type === 'fill' ? escapeHtml(String(q.question).replace(/_{4,}/g, '＿＿＿＿')) : blankify(questionDisplayText(q))) + '</div>' +
         bodyHTML +
         '<div class="quiz-actions">' +
-          '<span class="hint-keys">快捷键：1-4 选选项 · Enter 提交/下一题</span>' +
+          '<span class="hint-keys">' +
+            (q.type === 'choice' ? '快捷键：1-4 选选项 · Enter 提交/下一题' :
+             q.type === 'judge' ? '快捷键：1 选正确 · 2 选错误 · Enter 提交/下一题' :
+             '快捷键：Enter 提交/下一题') + '</span>' +
           '<div style="display:flex;gap:10px;align-items:center">' +
             '<button class="skip-btn" id="qSkip" type="button">跳过</button>' +
             '<button class="primary-btn" id="qSubmit" type="button">提 交</button>' +
@@ -440,7 +456,7 @@ function renderQuizQuestion() {
     else nextQuestion();
   });
 
-  if (q.type === 'choice') {
+  if (q.type === 'choice' || q.type === 'judge') {
     $$('.opt', stage).forEach(btn => btn.addEventListener('click', () => {
       if (quiz.answered) return;
       $$('.opt', stage).forEach(x => x.classList.remove('is-picked'));
@@ -471,6 +487,11 @@ function submitAnswer(skipped) {
     picked = quiz.picked;
     if (skipped || picked == null) verdict = 'bad';
     else verdict = picked === q.answer ? 'good' : 'bad';
+  } else if (q.type === 'judge') {
+    /* picked: 0=正确 1=错误；q.answer: true/false */
+    picked = quiz.picked;
+    if (skipped || picked == null) verdict = 'bad';
+    else verdict = picked === (q.answer ? 0 : 1) ? 'good' : 'bad';
   } else if (q.type === 'fill') {
     values = $$('#quizCard .fill-in').map(inp => inp.value);
     if (skipped || values.every(v => !v.trim())) verdict = 'bad';
@@ -491,10 +512,18 @@ function submitAnswer(skipped) {
 
   /* 锁定输入 */
   $('#quizCard').classList.add('locked');
-  $$('.opt', $('#quizCard')).forEach((btn, i) => {
-    if (i === q.answer) btn.classList.add('is-right');
-    else if (i === picked) btn.classList.add('is-wrong');
-  });
+  if (q.type === 'judge') {
+    const rightIdx = q.answer ? 0 : 1;
+    $$('#quizCard .judge-opt').forEach((btn, i) => {
+      if (i === rightIdx) btn.classList.add('is-right');
+      else if (i === picked) btn.classList.add('is-wrong');
+    });
+  } else {
+    $$('.opt', $('#quizCard')).forEach((btn, i) => {
+      if (i === q.answer) btn.classList.add('is-right');
+      else if (i === picked) btn.classList.add('is-wrong');
+    });
+  }
   $$('#quizCard .fill-in').forEach((inp, i) => {
     if (grade && grade.perBlank && grade.perBlank[i]) inp.classList.add('ok');
     else inp.classList.add('no');
@@ -521,7 +550,7 @@ function showFeedback(q, result) {
       ? escapeHtml((q.answers || []).map(b => b[0]).join('　；　'))
       : escapeHtml(refAnswerText(q))) + '</div></div>';
 
-  if ((q.type === 'term' || q.type === 'short') && info.grade && !info.skipped) {
+  if ((q.type === 'term' || q.type === 'short' || q.type === 'comp') && info.grade && !info.skipped) {
     const g = info.grade;
     body += '<div><div class="ref-label" style="font-family:var(--font-mono);font-size:11.5px;letter-spacing:.18em;color:var(--teal);margin-bottom:5px">关键词命中 ' +
       g.matched.length + '/' + (g.matched.length + g.missed.length) + '</div><div class="kw-chips">' +
@@ -532,7 +561,7 @@ function showFeedback(q, result) {
   if (q.explanation) {
     body += '<div class="qa-exp" style="margin-top:0"><b>解析</b> ' + escapeHtml(q.explanation) + '</div>';
   }
-  if (q.type === 'term' || q.type === 'short' || q.type === 'fill') {
+  if (q.type === 'term' || q.type === 'short' || q.type === 'comp' || q.type === 'fill') {
     body += '<div class="override-row">觉得判得不准？' +
       '<button class="mini-btn ov-yes" id="ovYes" type="button">✓ 算我对</button>' +
       '<button class="mini-btn ov-no" id="ovNo" type="button">✗ 算我错</button></div>';
@@ -1080,6 +1109,10 @@ function bindStatic() {
       if (q.type === 'choice' && /^[1-4]$/.test(e.key)) {
         const idx = +e.key - 1;
         const btn = $$('#quizCard .opt')[idx];
+        if (btn) btn.click();
+      } else if (q.type === 'judge' && /^[12]$/.test(e.key)) {
+        const idx = +e.key - 1;
+        const btn = $$('#quizCard .judge-opt')[idx];
         if (btn) btn.click();
       } else if (e.key === 'Enter') {
         e.preventDefault();
